@@ -18,6 +18,7 @@ import {
   matches,
   rollFrom,
 } from "./lib/companion.js";
+import { formatDoctorReport, getDoctorReport } from "./lib/doctor.js";
 import { findBinaryPath, findConfigPath, getPatchability } from "./lib/runtime.js";
 
 if (typeof Bun === "undefined") {
@@ -290,6 +291,7 @@ async function main() {
       list: { type: "boolean", default: false },
       restore: { type: "boolean", default: false },
       current: { type: "boolean", default: false },
+      doctor: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
     strict: false,
@@ -304,6 +306,7 @@ async function main() {
     bunx buddy-reroll --species dragon --rarity legendary --eye ✦ --shiny
     bunx buddy-reroll --list                        Show all available options
     bunx buddy-reroll --current                     Show current companion
+    bunx buddy-reroll --doctor                      Diagnose runtime/config discovery
     bunx buddy-reroll --restore                     Restore original binary
 
   Flags (all optional — omit to leave random):
@@ -313,6 +316,11 @@ async function main() {
     --hat <name>        ${HATS.join(", ")}
     --shiny / --no-shiny
 `);
+    return;
+  }
+
+  if (args.doctor) {
+    console.log(`\n${formatDoctorReport(getDoctorReport(), "buddy-reroll doctor")}\n`);
     return;
   }
 
@@ -338,7 +346,7 @@ async function main() {
   }
 
   const hasTargetFlags = args.species || args.rarity || args.eye || args.hat || args.shiny !== undefined;
-  const isCommand = args.restore || args.current;
+  const isCommand = args.restore || args.current || args.doctor;
 
   if (!hasTargetFlags && !isCommand) {
     await interactiveMode(binaryPath, configPath, userId);

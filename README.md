@@ -36,6 +36,9 @@ buddy-reroll --species cat --rarity epic
 # Show current companion
 buddy-reroll --current
 
+# Diagnose binary/config discovery
+buddy-reroll --doctor
+
 # Restore original binary
 buddy-reroll --restore
 ```
@@ -63,6 +66,14 @@ buddy-reroll --restore
 - `--restore` and any reroll command require write access to the real Claude binary because the tool creates `<binary>.backup` and patches the executable in place.
 
 ## Troubleshooting
+
+If something is not working, start with:
+
+```bash
+buddy-reroll --doctor
+```
+
+This prints the detected binary path, config path, whether `--current` can run, whether the real binary is writable, and the next troubleshooting step.
 
 If you see a message saying the Claude install is not writable, `buddy-reroll` successfully found Claude Code but cannot patch that installation as the current user. This is common when Claude was installed as a system package and the real binary lives in a root-owned directory outside your user-writable paths.
 
