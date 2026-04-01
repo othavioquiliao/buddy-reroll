@@ -9,7 +9,8 @@
   "scripts": {
     "help": "bun run index.js --help",
     "list": "bun run index.js --list",
-    "verify": "bun run help && bun run list && npm pack --dry-run"
+    "verify:runtime": "bun run scripts/verify-runtime.js",
+    "verify": "bun run help && bun run list && bun run verify:runtime && npm pack --dry-run"
   },
   "files": [
     "index.js",

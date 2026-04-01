@@ -16,6 +16,11 @@ bunx buddy-reroll
 
 If you install the package with `npm` or `pnpm`, that only changes the package manager used to place files on disk. It does not replace the Bun runtime requirement.
 
+Optional runtime overrides:
+
+- `CLAUDE_BINARY_PATH` forces a specific Claude Code binary path when auto-discovery via `PATH` is not enough.
+- `CLAUDE_CONFIG_DIR` forces a specific Claude config directory when you do not want the default home-based lookup.
+
 ## Usage
 
 ```bash
@@ -53,13 +58,21 @@ buddy-reroll --restore
 ## Runtime Notes
 
 - `buddy-reroll` is intentionally Bun-only in runtime for now. `npm` and `pnpm` are not drop-in runtime replacements.
-- `buddy-reroll` now resolves Claude installs exposed through small wrapper scripts such as `/usr/bin/claude -> /opt/claude-code/bin/claude`.
+- `buddy-reroll` first tries to discover Claude Code dynamically from `PATH`, then checks user-scoped install locations derived from the current OS.
 - `--current`, `--help`, and `--list` work with read-only/system-managed Claude installs.
 - `--restore` and any reroll command require write access to the real Claude binary because the tool creates `<binary>.backup` and patches the executable in place.
 
 ## Troubleshooting
 
-If you see a message saying the Claude install is not writable, `buddy-reroll` successfully found Claude Code but cannot patch that installation as the current user. This is common when Claude was installed as a system package and the real binary lives under `/opt` or another root-owned directory.
+If you see a message saying the Claude install is not writable, `buddy-reroll` successfully found Claude Code but cannot patch that installation as the current user. This is common when Claude was installed as a system package and the real binary lives in a root-owned directory outside your user-writable paths.
+
+For fully automatic local validation, run:
+
+```bash
+bun run verify
+```
+
+This command runs the basic CLI checks, discovers Claude dynamically, and only runs the `--current` smoke check when both the binary and config were found on the machine.
 
 ## License
 
