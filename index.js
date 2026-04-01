@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from "fs";
 import { platform } from "os";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { parseArgs } from "util";
 import chalk from "chalk";
 import { renderSprite, colorizeSprite, RARITY_STARS, RARITY_COLORS } from "./sprites.js";
@@ -36,14 +36,24 @@ function getUserId(configPath) {
 function isClaudeRunning() {
   try {
     if (platform() === "win32") {
-      const out = execSync('tasklist /FI "IMAGENAME eq claude.exe" /FO CSV 2>nul', { encoding: "utf-8" });
+      const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
       return out.toLowerCase().includes("claude.exe");
     }
-    const out = execSync("pgrep -af claude 2>/dev/null", { encoding: "utf-8" });
+    const out = execFileSync("pgrep", ["-af", "claude"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     return out.split("\n").some((line) => !line.includes("buddy-reroll") && line.trim().length > 0);
   } catch {
     return false;
   }
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function patchBinary(binaryPath, oldSalt, newSalt) {
@@ -75,7 +85,7 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
       return count;
     } catch (err) {
       if (isWin && (err.code === "EACCES" || err.code === "EPERM" || err.code === "EBUSY") && attempt < maxRetries - 1) {
-        execSync("timeout /t 2 /nobreak >nul 2>&1", { shell: true, stdio: "ignore" });
+        sleepMs(2000);
         continue;
       }
       throw new Error(`Failed to write binary: ${err.message}${isWin ? " (ensure Claude Code is fully closed)" : ""}`);
@@ -86,7 +96,9 @@ function patchBinary(binaryPath, oldSalt, newSalt) {
 function resignBinary(binaryPath) {
   if (platform() !== "darwin") return false;
   try {
-    execSync(`codesign -s - --force "${binaryPath}" 2>/dev/null`);
+    execFileSync("codesign", ["-s", "-", "--force", binaryPath], {
+      stdio: "ignore",
+    });
     return true;
   } catch {
     return false;
