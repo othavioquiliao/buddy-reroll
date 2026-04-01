@@ -168,7 +168,6 @@ function SpeciesStep({ speciesList, current, onChange, onSubmit, onBack, isActiv
 
 function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
   const [progress, setProgress] = useState("");
-  const [error, setError] = useState(null);
   const cancelRef = useRef(false);
   const { exit } = useApp();
 
@@ -188,18 +187,9 @@ function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
       });
       if (cancelRef.current) return;
       if (found) onFound(found);
-      else setError("No matching salt found. Try relaxing constraints.");
+      else onFail();
     })();
   }, []);
-
-  if (error) {
-    return (
-      <Box flexDirection="column">
-        <Text color="red">✗ {error}</Text>
-        <KeyHint>Press esc to exit</KeyHint>
-      </Box>
-    );
-  }
 
   return (
     <Box flexDirection="column">
@@ -211,6 +201,7 @@ function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
 
 function DoneStep({ messages, isActive }) {
   const { exit } = useApp();
+  const hasErrors = messages.some((msg) => msg.startsWith("Error:"));
 
   useInput(() => {
     exit();
@@ -219,10 +210,16 @@ function DoneStep({ messages, isActive }) {
   return (
     <Box flexDirection="column">
       {messages.map((msg, i) => (
-        <Text key={i} color="green">✓ {msg}</Text>
+        <Text key={i} color={msg.startsWith("Error:") ? "red" : "green"}>
+          {msg.startsWith("Error:") ? "✗ " : "✓ "}{msg.replace(/^Error:\s*/, "")}
+        </Text>
       ))}
       <Box marginTop={1}>
-        <Text bold>Done! Restart Claude Code and run /buddy to hatch your new companion.</Text>
+        <Text bold>
+          {hasErrors
+            ? "Unable to finish. Resolve the issue above and try again."
+            : "Done! Restart Claude Code and run /buddy to hatch your new companion."}
+        </Text>
       </Box>
       <KeyHint>Press any key to exit</KeyHint>
     </Box>
@@ -243,7 +240,7 @@ function App({ opts }) {
   const { exit } = useApp();
   const {
     currentRoll, currentSalt, binaryPath, configPath, userId,
-    bruteForce, patchBinary, resignBinary, clearCompanion, isClaudeRunning,
+    bruteForce, patchBinary, resignBinary, clearCompanion, getPatchability, isClaudeRunning,
     rollFrom, matches, SPECIES, RARITIES, RARITY_LABELS, EYES, HATS,
   } = opts;
 
@@ -294,16 +291,29 @@ function App({ opts }) {
               if (action === "current") {
                 setStep("showCurrent");
               } else if (action === "restore") {
-                const backupPath = binaryPath + ".backup";
+                const patchability = getPatchability(binaryPath);
+                if (!patchability.ok) {
+                  setDoneMessages([`Error: ${patchability.message}`]);
+                  setStep("done");
+                  return;
+                }
+
+                const { backupPath } = patchability;
                 if (!existsSync(backupPath)) {
                   setDoneMessages(["No backup found. Nothing to restore."]);
                   setStep("done");
                   return;
                 }
-                copyFileSync(backupPath, binaryPath);
-                resignBinary(binaryPath);
-                clearCompanion(configPath);
-                setDoneMessages(["Restored! Restart Claude Code and run /buddy."]);
+
+                try {
+                  copyFileSync(backupPath, binaryPath);
+                  resignBinary(binaryPath);
+                  clearCompanion(configPath);
+                  setDoneMessages(["Restored! Restart Claude Code and run /buddy."]);
+                } catch (err) {
+                  setDoneMessages([`Error: ${err.message}`]);
+                }
+
                 setStep("done");
               } else {
                 setStep("species");
@@ -399,7 +409,15 @@ function App({ opts }) {
             <ConfirmSelect
               label="Search and apply?"
               isActive={step === "confirm"}
-              onConfirm={() => setStep("search")}
+              onConfirm={() => {
+                const patchability = getPatchability(binaryPath);
+                if (!patchability.ok) {
+                  setDoneMessages([`Error: ${patchability.message}`]);
+                  setStep("done");
+                  return;
+                }
+                setStep("search");
+              }}
               onCancel={() => exit()}
               onBack={() => goBack()}
             />
@@ -427,17 +445,30 @@ function App({ opts }) {
               label="Apply patch?"
               isActive={step === "result"}
               onConfirm={() => {
-                const msgs = [];
-                const backupPath = binaryPath + ".backup";
-                if (!existsSync(backupPath)) {
-                  copyFileSync(binaryPath, backupPath);
-                  msgs.push(`Backup saved to ${backupPath}`);
+                const patchability = getPatchability(binaryPath);
+                if (!patchability.ok) {
+                  setDoneMessages([`Error: ${patchability.message}`]);
+                  setStep("done");
+                  return;
                 }
-                const count = patchBinary(binaryPath, currentSalt, found.salt);
-                msgs.push(`Patched ${count} occurrence(s)`);
-                if (resignBinary(binaryPath)) msgs.push("Binary re-signed (ad-hoc codesign)");
-                clearCompanion(configPath);
-                msgs.push("Companion data cleared");
+
+                const msgs = [];
+                const { backupPath } = patchability;
+
+                try {
+                  if (!existsSync(backupPath)) {
+                    copyFileSync(binaryPath, backupPath);
+                    msgs.push(`Backup saved to ${backupPath}`);
+                  }
+                  const count = patchBinary(binaryPath, currentSalt, found.salt);
+                  msgs.push(`Patched ${count} occurrence(s)`);
+                  if (resignBinary(binaryPath)) msgs.push("Binary re-signed (ad-hoc codesign)");
+                  clearCompanion(configPath);
+                  msgs.push("Companion data cleared");
+                } catch (err) {
+                  msgs.push(`Error: ${err.message}`);
+                }
+
                 setDoneMessages(msgs);
                 setStep("done");
               }}

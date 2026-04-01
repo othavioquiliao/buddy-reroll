@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, statSync, realpathSync } from "fs";
-import { join } from "path";
-import { homedir, platform } from "os";
+import { readFileSync, writeFileSync, existsSync, copyFileSync } from "fs";
+import { platform } from "os";
 import { execSync } from "child_process";
 import { parseArgs } from "util";
 import chalk from "chalk";
 import { renderSprite, colorizeSprite, RARITY_STARS, RARITY_COLORS } from "./sprites.js";
+import { findBinaryPath, findConfigPath, getPatchability } from "./lib/runtime.js";
 
 if (typeof Bun === "undefined") {
   console.error("buddy-reroll requires Bun runtime (uses Bun.hash).\nInstall: https://bun.sh");
@@ -91,62 +91,6 @@ function rollFrom(salt, userId) {
   }
 
   return { rarity, species, eye, hat, shiny, stats };
-}
-
-// ── Path detection ───────────────────────────────────────────────────────
-
-function getClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-}
-
-function findBinaryPath() {
-  const isWin = platform() === "win32";
-
-  try {
-    const cmd = isWin ? "where.exe claude 2>nul" : "which -a claude 2>/dev/null";
-    const allPaths = execSync(cmd, { encoding: "utf-8" }).trim().split("\n");
-    for (const entry of allPaths) {
-      try {
-        const resolved = realpathSync(entry.trim());
-        if (resolved && existsSync(resolved) && statSync(resolved).size > 1_000_000) return resolved;
-      } catch {}
-    }
-  } catch {}
-
-  const versionsDirs = [
-    join(homedir(), ".local", "share", "claude", "versions"),
-    ...(isWin ? [join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "Claude", "versions")] : []),
-  ];
-  for (const versionsDir of versionsDirs) {
-    if (!existsSync(versionsDir)) continue;
-    try {
-      const versions = readdirSync(versionsDir)
-        .filter((f) => !f.includes(".backup"))
-        .sort();
-      if (versions.length > 0) return join(versionsDir, versions[versions.length - 1]);
-    } catch {}
-  }
-
-  return null;
-}
-
-function findConfigPath() {
-  const claudeDir = getClaudeConfigDir();
-
-  const legacyPath = join(claudeDir, ".config.json");
-  if (existsSync(legacyPath)) return legacyPath;
-
-  const home = process.env.CLAUDE_CONFIG_DIR || homedir();
-  const defaultPath = join(home, ".claude.json");
-  if (existsSync(defaultPath)) return defaultPath;
-
-  // Windows: check AppData\Roaming\Claude
-  if (platform() === "win32" && process.env.APPDATA) {
-    const appDataPath = join(process.env.APPDATA, "Claude", "config.json");
-    if (existsSync(appDataPath)) return appDataPath;
-  }
-
-  return null;
 }
 
 function getUserId(configPath) {
@@ -362,6 +306,7 @@ async function interactiveMode(binaryPath, configPath, userId) {
     patchBinary,
     resignBinary,
     clearCompanion,
+    getPatchability,
     isClaudeRunning,
     rollFrom,
     matches,
@@ -381,14 +326,27 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
   console.log(`  User ID: ${userId.slice(0, 8)}...`);
 
   if (args.restore) {
-    const backupPath = binaryPath + ".backup";
+    const patchability = getPatchability(binaryPath);
+    if (!patchability.ok) {
+      console.error(`  ✗ ${patchability.message}`);
+      process.exit(1);
+    }
+
+    const { backupPath } = patchability;
     if (!existsSync(backupPath)) {
       console.error("  ✗ No backup found at", backupPath);
       process.exit(1);
     }
-    copyFileSync(backupPath, binaryPath);
-    resignBinary(binaryPath);
-    clearCompanion(configPath);
+
+    try {
+      copyFileSync(backupPath, binaryPath);
+      resignBinary(binaryPath);
+      clearCompanion(configPath);
+    } catch (err) {
+      console.error(`  ✗ ${err.message}`);
+      process.exit(1);
+    }
+
     console.log("  ✓ Restored. Restart Claude Code and run /buddy.");
     return;
   }
@@ -440,6 +398,12 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
     return;
   }
 
+  const patchability = getPatchability(binaryPath);
+  if (!patchability.ok) {
+    console.error(`  ✗ ${patchability.message}`);
+    process.exit(1);
+  }
+
   if (isClaudeRunning()) {
     console.warn("  ⚠ Claude Code appears to be running. Quit it before patching to avoid issues.");
   }
@@ -453,18 +417,28 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
   console.log(`  ✓ Found in ${found.checked.toLocaleString()} attempts (${(found.elapsed / 1000).toFixed(1)}s)`);
   console.log(formatCompanionCard(found.result));
 
-  const backupPath = binaryPath + ".backup";
+  const { backupPath } = patchability;
   if (!existsSync(backupPath)) {
-    copyFileSync(binaryPath, backupPath);
-    console.log(`\n  Backup:  ${backupPath}`);
+    try {
+      copyFileSync(binaryPath, backupPath);
+      console.log(`\n  Backup:  ${backupPath}`);
+    } catch (err) {
+      console.error(`  ✗ ${err.message}`);
+      process.exit(1);
+    }
   }
 
-  const patchCount = patchBinary(binaryPath, currentSalt, found.salt);
-  console.log(`  Patched: ${patchCount} occurrence(s)`);
-  if (resignBinary(binaryPath)) console.log("  Signed:  ad-hoc codesign ✓");
-  clearCompanion(configPath);
-  console.log("  Config:  companion data cleared");
-  console.log("\n  Done! Restart Claude Code and run /buddy.\n");
+  try {
+    const patchCount = patchBinary(binaryPath, currentSalt, found.salt);
+    console.log(`  Patched: ${patchCount} occurrence(s)`);
+    if (resignBinary(binaryPath)) console.log("  Signed:  ad-hoc codesign ✓");
+    clearCompanion(configPath);
+    console.log("  Config:  companion data cleared");
+    console.log("\n  Done! Restart Claude Code and run /buddy.\n");
+  } catch (err) {
+    console.error(`  ✗ ${err.message}`);
+    process.exit(1);
+  }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
@@ -518,13 +492,13 @@ async function main() {
 
   const binaryPath = findBinaryPath();
   if (!binaryPath) {
-    console.error("✗ Could not find Claude Code binary. Is it installed?");
+    console.error("✗ Could not find Claude Code binary. Checked PATH and known install locations.");
     process.exit(1);
   }
 
   const configPath = findConfigPath();
   if (!configPath) {
-    console.error("✗ Could not find Claude Code config file.");
+    console.error("✗ Could not find Claude Code config file. Checked ~/.claude/.config.json and ~/.claude.json.");
     process.exit(1);
   }
 

@@ -8,6 +8,7 @@
   },
   "files": [
     "index.js",
+    "lib",
     "ui.jsx",
     "sprites.js"
   ],
