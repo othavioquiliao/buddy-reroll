@@ -1,21 +1,26 @@
 #!/usr/bin/env bun
-// buddy-reroll — Reroll your Claude Code companion to any combo you want.
-// Requires Bun (uses Bun.hash which matches Claude Code's internal hash).
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, statSync, realpathSync } from "fs";
 import { join } from "path";
 import { homedir, platform } from "os";
 import { execSync } from "child_process";
 import { parseArgs } from "util";
 import * as p from "@clack/prompts";
 
-// ── Constants (must match Claude Code internals) ──────────────────────────
+if (typeof Bun === "undefined") {
+  console.error("buddy-reroll requires Bun runtime (uses Bun.hash).\nInstall: https://bun.sh");
+  process.exit(1);
+}
+
+// ── Constants (synced with Claude Code src/buddy/types.ts) ───────────────
 
 const ORIGINAL_SALT = "friend-2026-401";
-const SALT_LEN = ORIGINAL_SALT.length; // 15
+const SALT_LEN = ORIGINAL_SALT.length;
 
 const RARITIES = ["common", "uncommon", "rare", "epic", "legendary"];
 const RARITY_WEIGHTS = { common: 60, uncommon: 25, rare: 10, epic: 4, legendary: 1 };
+const RARITY_TOTAL = Object.values(RARITY_WEIGHTS).reduce((a, b) => a + b, 0);
+const RARITY_FLOOR = { common: 5, uncommon: 15, rare: 25, epic: 35, legendary: 50 };
 
 const SPECIES = [
   "duck", "goose", "blob", "cat", "dragon", "octopus", "owl", "penguin",
@@ -24,9 +29,7 @@ const SPECIES = [
 ];
 
 const EYES = ["·", "✦", "×", "◉", "@", "°"];
-
 const HATS = ["none", "crown", "tophat", "propeller", "halo", "wizard", "beanie", "tinyduck"];
-
 const STAT_NAMES = ["DEBUGGING", "PATIENCE", "CHAOS", "WISDOM", "SNARK"];
 
 const RARITY_LABELS = {
@@ -37,7 +40,7 @@ const RARITY_LABELS = {
   legendary: "Legendary (1%)",
 };
 
-// ── PRNG (Mulberry32 — matches Claude Code) ───────────────────────────────
+// ── PRNG (synced with Claude Code src/buddy/companion.ts) ────────────────
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -59,7 +62,7 @@ function pick(rng, arr) {
 }
 
 function rollRarity(rng) {
-  let roll = rng() * 100;
+  let roll = rng() * RARITY_TOTAL;
   for (const r of RARITIES) {
     roll -= RARITY_WEIGHTS[r];
     if (roll < 0) return r;
@@ -75,7 +78,6 @@ function rollFrom(salt, userId) {
   const hat = rarity === "common" ? "none" : pick(rng, HATS);
   const shiny = rng() < 0.01;
 
-  const RARITY_FLOOR = { common: 5, uncommon: 15, rare: 25, epic: 35, legendary: 50 };
   const floor = RARITY_FLOOR[rarity];
   const peak = pick(rng, STAT_NAMES);
   let dump = pick(rng, STAT_NAMES);
@@ -90,27 +92,23 @@ function rollFrom(salt, userId) {
   return { rarity, species, eye, hat, shiny, stats };
 }
 
-// ── Path detection ────────────────────────────────────────────────────────
+// ── Path detection ───────────────────────────────────────────────────────
 
-function resolveSymlink(filePath) {
-  try {
-    const resolved = execSync(`readlink "${filePath}" 2>/dev/null`, { encoding: "utf-8" }).trim();
-    if (resolved && existsSync(resolved)) return resolved;
-  } catch {}
-  return filePath;
+function getClaudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
 }
 
 function findBinaryPath() {
-  // Find all `claude` in PATH, skip shell wrappers, resolve symlinks
   try {
     const allPaths = execSync("which -a claude 2>/dev/null", { encoding: "utf-8" }).trim().split("\n");
-    for (const p of allPaths) {
-      const resolved = resolveSymlink(p.trim());
-      if (resolved && existsSync(resolved) && statSync(resolved).size > 1_000_000) return resolved;
+    for (const entry of allPaths) {
+      try {
+        const resolved = realpathSync(entry.trim());
+        if (resolved && existsSync(resolved) && statSync(resolved).size > 1_000_000) return resolved;
+      } catch {}
     }
   } catch {}
 
-  // Fallback: ~/.local/share/claude/versions/<latest>
   const versionsDir = join(homedir(), ".local", "share", "claude", "versions");
   if (existsSync(versionsDir)) {
     try {
@@ -123,11 +121,15 @@ function findBinaryPath() {
 }
 
 function findConfigPath() {
-  const home = homedir();
-  const legacyPath = join(home, ".claude", ".config.json");
+  const claudeDir = getClaudeConfigDir();
+
+  const legacyPath = join(claudeDir, ".config.json");
   if (existsSync(legacyPath)) return legacyPath;
+
+  const home = process.env.CLAUDE_CONFIG_DIR || homedir();
   const defaultPath = join(home, ".claude.json");
   if (existsSync(defaultPath)) return defaultPath;
+
   return null;
 }
 
@@ -136,64 +138,53 @@ function getUserId(configPath) {
   return config.oauthAccount?.accountUuid ?? config.userID ?? "anon";
 }
 
-// ── Salt detection ────────────────────────────────────────────────────────
-// The salt appears in the JS bundle inside the binary as a quoted string.
-// Instead of relying on minified variable names (which change per build),
-// we search for any 15-byte ASCII string that, when used as a salt with
-// the user's ID, reproduces the companion roll stored in config — or falls
-// back to known patterns.
+// ── Salt detection ───────────────────────────────────────────────────────
 
-function findCurrentSalt(binaryData) {
-  // 1. Try the original salt
+function findCurrentSalt(binaryData, userId) {
   if (binaryData.includes(Buffer.from(ORIGINAL_SALT))) return ORIGINAL_SALT;
 
-  // 2. Try to find a previously patched salt by scanning for known patterns
-  //    Our patches use "xxxxxxx" prefix or "friend-2026-" prefix
-  const patterns = [/xxxxxxx\d{8}/, /friend-2026-.{3}/];
   const text = binaryData.toString("utf-8");
+
+  // Scan for previously patched salts (our known patterns)
+  const patterns = [
+    new RegExp(`x{${SALT_LEN - 8}}\\d{8}`, "g"),
+    new RegExp(`friend-\\d{4}-.{${SALT_LEN - 12}}`, "g"),
+  ];
   for (const pat of patterns) {
-    const m = text.match(pat);
-    if (m && m[0].length === SALT_LEN) return m[0];
+    let m;
+    while ((m = pat.exec(text)) !== null) {
+      if (m[0].length === SALT_LEN) return m[0];
+    }
   }
 
-  // 3. Generic scan: look for the salt near the PRNG/companion code markers.
-  //    Search for strings near "friend-" or near "Mulberry" or "rollRarity"
-  //    that are exactly SALT_LEN printable ASCII chars inside quotes.
-  const saltRegex = /"([a-zA-Z0-9_-]{15})"/g;
+  // Contextual scan near companion code markers
+  const saltRegex = new RegExp(`"([a-zA-Z0-9_-]{${SALT_LEN}})"`, "g");
   const candidates = new Set();
-  let match;
-  // Narrow the search to regions near companion-related strings
-  const markers = ["rollRarity", "CompanionBones", "inspirationSeed", "mulberry32"];
+  const markers = ["rollRarity", "CompanionBones", "inspirationSeed", "companionUserId"];
   for (const marker of markers) {
     const markerIdx = text.indexOf(marker);
     if (markerIdx === -1) continue;
-    // Search in a ±5000 char window around the marker
-    const windowStart = Math.max(0, markerIdx - 5000);
-    const windowEnd = Math.min(text.length, markerIdx + 5000);
-    const window = text.slice(windowStart, windowEnd);
+    const window = text.slice(Math.max(0, markerIdx - 5000), Math.min(text.length, markerIdx + 5000));
+    let match;
     while ((match = saltRegex.exec(window)) !== null) {
       candidates.add(match[1]);
     }
   }
 
-  // Test each candidate: the one that produces a valid companion roll is our salt
-  if (candidates.size > 0) {
-    // We can't verify without userId, but return the first plausible one
-    for (const c of candidates) {
-      if (c.length === SALT_LEN) return c;
-    }
+  // Filter: real salts contain digits or hyphens (rules out "projectSettings" etc.)
+  for (const c of candidates) {
+    if (/[\d-]/.test(c)) return c;
   }
 
   return null;
 }
 
-// ── Brute-force ───────────────────────────────────────────────────────────
+// ── Brute-force ──────────────────────────────────────────────────────────
 
 function bruteForce(userId, target, spinner) {
   const startTime = Date.now();
   let checked = 0;
 
-  // Phase 1: "friend-2026-XXX" pattern (262K combinations)
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
   const suffixLen = SALT_LEN - "friend-2026-".length;
   if (suffixLen > 0 && suffixLen <= 4) {
@@ -209,10 +200,8 @@ function bruteForce(userId, target, spinner) {
     }
   }
 
-  // Phase 2: "xxxxxxxNNNNNNNN" pattern (up to 1B)
   for (let i = 0; i < 1_000_000_000; i++) {
     const salt = String(i).padStart(SALT_LEN, "x");
-    if (salt.length !== SALT_LEN) continue;
     checked++;
     const r = rollFrom(salt, userId);
     if (matches(r, target)) return { salt, result: r, checked, elapsed: Date.now() - startTime };
@@ -235,7 +224,16 @@ function matches(roll, target) {
   return true;
 }
 
-// ── Binary patch ──────────────────────────────────────────────────────────
+// ── Binary patch ─────────────────────────────────────────────────────────
+
+function isClaudeRunning() {
+  try {
+    const out = execSync("pgrep -af claude 2>/dev/null", { encoding: "utf-8" });
+    return out.split("\n").some((line) => !line.includes("buddy-reroll") && line.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
 
 function patchBinary(binaryPath, oldSalt, newSalt) {
   if (oldSalt.length !== newSalt.length) {
@@ -273,17 +271,19 @@ function resignBinary(binaryPath) {
 }
 
 function clearCompanion(configPath) {
-  const config = JSON.parse(readFileSync(configPath, "utf-8"));
+  const raw = readFileSync(configPath, "utf-8");
+  const config = JSON.parse(raw);
   delete config.companion;
   delete config.companionMuted;
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  const indent = raw.match(/^(\s+)"/m)?.[1] ?? "  ";
+  writeFileSync(configPath, JSON.stringify(config, null, indent) + "\n");
 }
 
-// ── Display helpers ───────────────────────────────────────────────────────
+// ── Display ──────────────────────────────────────────────────────────────
 
 function formatRoll(result) {
   const lines = [];
-  lines.push(`  ${result.species} / ${result.rarity} / eye:${result.eye} / hat:${result.hat}${result.shiny ? " / ✨ shiny" : ""}`);
+  lines.push(`  ${result.species} / ${result.rarity} / eye:${result.eye} / hat:${result.hat}${result.shiny ? " / shiny" : ""}`);
   for (const [k, v] of Object.entries(result.stats)) {
     const bar = "█".repeat(Math.round(v / 10)) + "░".repeat(10 - Math.round(v / 10));
     lines.push(`  ${k.padEnd(10)} ${bar} ${String(v).padStart(3)}`);
@@ -291,13 +291,13 @@ function formatRoll(result) {
   return lines.join("\n");
 }
 
-// ── Interactive mode ──────────────────────────────────────────────────────
+// ── Interactive mode ─────────────────────────────────────────────────────
 
 async function interactiveMode(binaryPath, configPath, userId) {
   p.intro("buddy-reroll");
 
   const binaryData = readFileSync(binaryPath);
-  const currentSalt = findCurrentSalt(binaryData);
+  const currentSalt = findCurrentSalt(binaryData, userId);
   if (!currentSalt) {
     p.cancel("Could not find companion salt in binary.");
     process.exit(1);
@@ -332,8 +332,6 @@ async function interactiveMode(binaryPath, configPath, userId) {
     p.outro("Restored! Restart Claude Code and run /buddy.");
     return;
   }
-
-  // ── Reroll flow ──
 
   const species = await p.select({
     message: "Species",
@@ -374,7 +372,7 @@ async function interactiveMode(binaryPath, configPath, userId) {
   } else {
     hat = await p.select({
       message: "Hat",
-      options: HATS.filter((h) => h !== "none").map((h) => ({
+      options: HATS.map((h) => ({
         value: h,
         label: h,
         hint: h === currentRoll.hat ? "current" : undefined,
@@ -392,21 +390,22 @@ async function interactiveMode(binaryPath, configPath, userId) {
 
   const target = { species, rarity, eye, hat, shiny };
 
-  // Check if already matching
   if (matches(currentRoll, target)) {
     p.outro("Already matching! No changes needed.");
     return;
   }
 
-  // Preview target
-  p.log.info(`Target: ${species} / ${rarity} / eye:${eye} / hat:${hat}${shiny ? " / ✨ shiny" : ""}`);
+  p.log.info(`Target: ${species} / ${rarity} / eye:${eye} / hat:${hat}${shiny ? " / shiny" : ""}`);
 
-  const confirm = await p.confirm({
-    message: "Search and apply?",
-  });
+  const confirm = await p.confirm({ message: "Search and apply?" });
   if (p.isCancel(confirm) || !confirm) { p.cancel(); process.exit(0); }
 
-  // ── Search ──
+  if (isClaudeRunning()) {
+    p.log.warn("Claude Code appears to be running. Quit it before patching to avoid issues.");
+    const proceed = await p.confirm({ message: "Patch anyway?" });
+    if (p.isCancel(proceed) || !proceed) { p.cancel(); process.exit(0); }
+  }
+
   const spinner = p.spinner();
   spinner.start("Searching for matching salt...");
 
@@ -419,7 +418,6 @@ async function interactiveMode(binaryPath, configPath, userId) {
 
   p.note(formatRoll(found.result), "New companion");
 
-  // ── Apply ──
   const backupPath = binaryPath + ".backup";
   if (!existsSync(backupPath)) {
     copyFileSync(binaryPath, backupPath);
@@ -439,22 +437,12 @@ async function interactiveMode(binaryPath, configPath, userId) {
   p.outro("Done! Restart Claude Code and run /buddy to hatch your new companion.");
 }
 
-// ── Non-interactive mode ──────────────────────────────────────────────────
+// ── Non-interactive mode ─────────────────────────────────────────────────
 
 function nonInteractiveMode(args, binaryPath, configPath, userId) {
   console.log(`  Binary:  ${binaryPath}`);
   console.log(`  Config:  ${configPath}`);
   console.log(`  User ID: ${userId.slice(0, 8)}...`);
-
-  if (args.current) {
-    const binaryData = readFileSync(binaryPath);
-    const currentSalt = findCurrentSalt(binaryData) ?? ORIGINAL_SALT;
-    const result = rollFrom(currentSalt, userId);
-    console.log(`\n  Current companion (salt: ${currentSalt}):`);
-    console.log(formatRoll(result));
-    console.log();
-    return;
-  }
 
   if (args.restore) {
     const backupPath = binaryPath + ".backup";
@@ -469,7 +457,21 @@ function nonInteractiveMode(args, binaryPath, configPath, userId) {
     return;
   }
 
-  // Build target from flags
+  const binaryData = readFileSync(binaryPath);
+  const currentSalt = findCurrentSalt(binaryData, userId);
+  if (!currentSalt) {
+    console.error("  ✗ Could not find companion salt in binary.");
+    process.exit(1);
+  }
+
+  if (args.current) {
+    const result = rollFrom(currentSalt, userId);
+    console.log(`\n  Current companion (salt: ${currentSalt}):`);
+    console.log(formatRoll(result));
+    console.log();
+    return;
+  }
+
   const target = {};
   if (args.species) {
     if (!SPECIES.includes(args.species)) { console.error(`  ✗ Unknown species "${args.species}". Use --list.`); process.exit(1); }
@@ -496,17 +498,14 @@ function nonInteractiveMode(args, binaryPath, configPath, userId) {
 
   console.log(`  Target:  ${Object.entries(target).map(([k, v]) => `${k}=${v}`).join(" ")}\n`);
 
-  const binaryData = readFileSync(binaryPath);
-  const currentSalt = findCurrentSalt(binaryData);
-  if (!currentSalt) {
-    console.error("  ✗ Could not find companion salt in binary.");
-    process.exit(1);
-  }
-
   const currentRoll = rollFrom(currentSalt, userId);
   if (matches(currentRoll, target)) {
     console.log("  ✓ Already matches!\n" + formatRoll(currentRoll));
     return;
+  }
+
+  if (isClaudeRunning()) {
+    console.warn("  ⚠ Claude Code appears to be running. Quit it before patching to avoid issues.");
   }
 
   console.log("  Searching...");
@@ -532,7 +531,7 @@ function nonInteractiveMode(args, binaryPath, configPath, userId) {
   console.log("\n  Done! Restart Claude Code and run /buddy.\n");
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────
 
 async function main() {
   const { values: args } = parseArgs({
@@ -578,14 +577,9 @@ async function main() {
     console.log("  Eye:       " + EYES.join("  "));
     console.log("  Hat:      ", HATS.join(", "));
     console.log("  Shiny:     true / false (1% natural chance)\n");
-    console.log("  Notes:");
-    console.log("  - common rarity always gets hat=none");
-    console.log("  - more constraints = longer search time");
-    console.log("  - shiny + legendary + specific species can take ~30s\n");
     return;
   }
 
-  // ── Detect paths ──
   const binaryPath = findBinaryPath();
   if (!binaryPath) {
     console.error("✗ Could not find Claude Code binary. Is it installed?");
@@ -599,8 +593,10 @@ async function main() {
   }
 
   const userId = getUserId(configPath);
+  if (userId === "anon") {
+    console.warn("⚠ No user ID found — using anonymous identity. Roll will change if you log in later.");
+  }
 
-  // If no target flags given → interactive mode
   const hasTargetFlags = args.species || args.rarity || args.eye || args.hat || args.shiny !== undefined;
   const isCommand = args.restore || args.current;
 
