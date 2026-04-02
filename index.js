@@ -284,7 +284,8 @@ async function nonInteractiveMode(args, binaryPath, configPath, userId) {
     if (resignBinary(binaryPath)) console.log("  Signed:  ad-hoc codesign ✓");
     clearCompanion(configPath);
     console.log("  Config:  companion data cleared");
-    console.log("\n  Done! Restart Claude Code and run /buddy.\n");
+    console.log("\n  Done! Restart Claude Code and run /buddy.");
+    console.log("  Note: Claude Code updates will reset your companion. Run buddy-reroll again after each update.\n");
   } catch (err) {
     fail(`  ✗ ${err.message}`);
   }

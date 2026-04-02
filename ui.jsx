@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
 import { renderSprite, RARITY_STARS, RARITY_COLORS } from "./sprites.js";
 import { existsSync, copyFileSync } from "fs";
+import { isSystemManagedPath } from "./lib/runtime.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 function Spinner({ label }) {
@@ -199,9 +200,23 @@ function SearchStep({ userId, target, bruteForce, onFound, onFail, isActive }) {
   );
 }
 
-function DoneStep({ messages, isActive }) {
+function SystemPackageHint({ binaryPath }) {
+  if (!binaryPath || !isSystemManagedPath(binaryPath)) return null;
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color="yellow">This typically happens with system packages (AUR, Homebrew, Nix, Snap).</Text>
+      <Text color="yellow">To use buddy-reroll, switch to the native installer:</Text>
+      <Text dimColor>  1. Remove the system package (e.g. sudo pacman -R claude-code)</Text>
+      <Text dimColor>  2. Install natively: curl -fsSL https://claude.ai/install.sh | sh</Text>
+      <Text dimColor>  3. Re-run: bunx buddy-reroll</Text>
+    </Box>
+  );
+}
+
+function DoneStep({ messages, isActive, binaryPath }) {
   const { exit } = useApp();
   const hasErrors = messages.some((msg) => msg.startsWith("Error:"));
+  const hasPatched = messages.some((msg) => msg.includes("Patched"));
 
   useInput(() => {
     exit();
@@ -214,6 +229,7 @@ function DoneStep({ messages, isActive }) {
           {msg.startsWith("Error:") ? "✗ " : "✓ "}{msg.replace(/^Error:\s*/, "")}
         </Text>
       ))}
+      {hasErrors && <SystemPackageHint binaryPath={binaryPath} />}
       <Box marginTop={1}>
         <Text bold>
           {hasErrors
@@ -221,6 +237,9 @@ function DoneStep({ messages, isActive }) {
             : "Done! Restart Claude Code and run /buddy to hatch your new companion."}
         </Text>
       </Box>
+      {hasPatched && (
+        <Text dimColor>Note: Claude Code updates will reset your companion. Run buddy-reroll again after each update.</Text>
+      )}
       <KeyHint>Press any key to exit</KeyHint>
     </Box>
   );
@@ -477,7 +496,7 @@ function App({ opts }) {
           </Box>
         )}
 
-        {step === "done" && <DoneStep messages={doneMessages} isActive={step === "done"} />}
+        {step === "done" && <DoneStep messages={doneMessages} isActive={step === "done"} binaryPath={binaryPath} />}
       </Box>
     </Box>
   );

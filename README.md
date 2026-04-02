@@ -65,6 +65,47 @@ buddy-reroll --restore
 - `--current`, `--help`, and `--list` work with read-only/system-managed Claude installs.
 - `--restore` and any reroll command require write access to the real Claude binary because the tool creates `<binary>.backup` and patches the executable in place.
 
+## System Package vs. Native Install
+
+buddy-reroll patches the Claude Code binary in place, which requires write access to the real executable.
+
+| Install method | Binary location | Writable? | Auto-update? | buddy-reroll? |
+|---|---|---|---|---|
+| **Native installer** | `~/.local/share/claude/versions/` | ✓ Yes | ✓ Yes | ✓ Full support |
+| **AUR** (`claude-code`) | `/opt/claude-code/bin/claude` | ✗ Root-owned | ✗ Disabled | Read-only (`--current` only) |
+| **Homebrew** | `/opt/homebrew/...` or `/usr/local/...` | ✗ Root-owned | Via `brew upgrade` | Read-only (`--current` only) |
+| **Nix** | `/nix/store/...` | ✗ Immutable | Via `nix profile upgrade` | Read-only (`--current` only) |
+| **Snap** | `/snap/...` | ✗ Read-only | Via snapd | Read-only (`--current` only) |
+
+**Recommended:** Use the native installer for the best experience with buddy-reroll.
+
+After each Claude Code update (native auto-update or manual), the companion resets. Run `buddy-reroll` again to re-patch.
+
+### Migration from System Package
+
+If you currently have Claude Code installed via a system package and want to switch to the native installer:
+
+**Arch Linux (AUR):**
+```bash
+sudo pacman -R claude-code
+curl -fsSL https://claude.ai/install.sh | sh
+bunx buddy-reroll
+```
+
+**Homebrew (macOS):**
+```bash
+brew uninstall claude-code
+curl -fsSL https://claude.ai/install.sh | sh
+bunx buddy-reroll
+```
+
+**Nix:**
+```bash
+nix profile remove claude-code
+curl -fsSL https://claude.ai/install.sh | sh
+bunx buddy-reroll
+```
+
 ## Troubleshooting
 
 If something is not working, start with:
@@ -73,9 +114,9 @@ If something is not working, start with:
 buddy-reroll --doctor
 ```
 
-This prints the detected binary path, config path, whether `--current` can run, whether the real binary is writable, and the next troubleshooting step.
+This prints the detected binary path, config path, install type, auto-update status, resolution chain, whether `--current` can run, whether the real binary is writable, and the next troubleshooting step.
 
-If you see a message saying the Claude install is not writable, `buddy-reroll` successfully found Claude Code but cannot patch that installation as the current user. This is common when Claude was installed as a system package and the real binary lives in a root-owned directory outside your user-writable paths.
+If you see a message saying the Claude install is not writable, `buddy-reroll` successfully found Claude Code but cannot patch that installation as the current user. This is common when Claude was installed as a system package and the real binary lives in a root-owned directory outside your user-writable paths. See [Migration from System Package](#migration-from-system-package) above.
 
 For fully automatic local validation, run:
 
